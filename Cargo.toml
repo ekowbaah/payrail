@@ -1,0 +1,11 @@
+[package]
+name = "payrail"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Auditable payment orchestration and double-entry ledger primitives"
+
+[lib]
+name = "payrail"
+path = "src/lib.rs"
+
