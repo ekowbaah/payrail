@@ -105,6 +105,28 @@ pub enum PaymentError {
     DuplicateIdempotencyKey,
     PaymentNotFound,
     InvalidTransition,
+    AmountMismatch,
+    UnknownSettlement,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SettlementLine {
+    pub external_id: String,
+    pub payment_id: String,
+    pub amount: Money,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReconciliationReport {
+    pub matched: Vec<String>,
+    pub missing: Vec<String>,
+    pub mismatched: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebhookEvent {
+    pub provider: String,
+    pub event_id: String,
+    pub payload: String,
 }
 
 #[derive(Default)]
@@ -113,6 +135,8 @@ pub struct PaymentEngine {
     idempotency: HashMap<String, String>,
     journal_references: HashSet<String>,
     journal: Vec<JournalEntry>,
+    webhook_ids: HashSet<String>,
+    webhook_inbox: Vec<WebhookEvent>,
 }
 
 impl PaymentEngine {
@@ -171,6 +195,50 @@ impl PaymentEngine {
     }
     pub fn journal(&self) -> &[JournalEntry] {
         &self.journal
+    }
+    /// Stores a provider event exactly once. Authentication is intentionally performed by the adapter.
+    pub fn ingest_webhook(&mut self, event: WebhookEvent) -> bool {
+        let key = format!("{}:{}", event.provider, event.event_id);
+        if !self.webhook_ids.insert(key) {
+            return false;
+        }
+        self.webhook_inbox.push(event);
+        true
+    }
+    pub fn webhook_inbox(&self) -> &[WebhookEvent] {
+        &self.webhook_inbox
+    }
+    /// Compares a provider settlement file with captured payments without mutating the ledger.
+    pub fn reconcile(&self, lines: &[SettlementLine]) -> ReconciliationReport {
+        let mut report = ReconciliationReport {
+            matched: vec![],
+            missing: vec![],
+            mismatched: vec![],
+        };
+        for line in lines {
+            match self.payments.get(&line.payment_id) {
+                None => report.missing.push(line.external_id.clone()),
+                Some(payment)
+                    if payment.state != PaymentState::Captured || payment.amount != line.amount =>
+                {
+                    report.mismatched.push(line.external_id.clone())
+                }
+                Some(_) => report.matched.push(line.external_id.clone()),
+            }
+        }
+        report
+    }
+    pub fn balance(&self, account: &str, currency: &Currency) -> Result<i64, PaymentError> {
+        self.journal
+            .iter()
+            .flat_map(|entry| &entry.postings)
+            .filter(|p| p.account == account && &p.currency == currency)
+            .try_fold(0i64, |balance, p| {
+                balance
+                    .checked_add(p.debit)
+                    .and_then(|v| v.checked_sub(p.credit))
+                    .ok_or(PaymentError::Overflow)
+            })
     }
 }
 
@@ -241,5 +309,39 @@ mod tests {
             ],
         };
         assert_eq!(entry.validate(), Err(PaymentError::UnbalancedJournal));
+    }
+    #[test]
+    fn reconciles_provider_settlements() {
+        let mut e = PaymentEngine::default();
+        let amount = Money::new(100, sek()).unwrap();
+        e.create("k", "p", amount.clone()).unwrap();
+        e.transition("p", PaymentState::Authorized).unwrap();
+        e.transition("p", PaymentState::Captured).unwrap();
+        let report = e.reconcile(&[
+            SettlementLine {
+                external_id: "s1".into(),
+                payment_id: "p".into(),
+                amount,
+            },
+            SettlementLine {
+                external_id: "s2".into(),
+                payment_id: "missing".into(),
+                amount: Money::new(1, sek()).unwrap(),
+            },
+        ]);
+        assert_eq!(report.matched, vec!["s1"]);
+        assert_eq!(report.missing, vec!["s2"]);
+    }
+    #[test]
+    fn webhooks_are_deduplicated_per_provider() {
+        let mut e = PaymentEngine::default();
+        let event = WebhookEvent {
+            provider: "stripe".into(),
+            event_id: "evt_1".into(),
+            payload: "{}".into(),
+        };
+        assert!(e.ingest_webhook(event.clone()));
+        assert!(!e.ingest_webhook(event));
+        assert_eq!(e.webhook_inbox().len(), 1);
     }
 }
