@@ -1,30 +1,21 @@
 # payrail
 
-Auditable payment orchestration and double-entry ledger primitives for teams that need correct money movement without adopting an entire payment platform.
+Payment and ledger primitives in Rust.
 
-The first release provides:
-
-- Integer minor-unit money with ISO-style currency validation
-- Idempotent payment creation
-- Explicit authorization, capture, failure, and refund transitions
-- Balanced, single-currency journal validation
-- Duplicate-reference protection for replay-safe posting
+The domain core handles integer minor-unit money, idempotent payment creation, authorization and capture transitions, balanced journal entries, replay-safe references, provider webhook deduplication, and settlement reconciliation.
 
 ```mermaid
 flowchart LR
-  API --> Idempotency
-  Idempotency --> Payments
-  Payments --> Provider[Payment provider adapter]
-  Payments --> Ledger[Double-entry ledger]
+  Request --> Idempotency
+  Idempotency --> Payment
+  Payment --> Ledger
+  Provider --> Inbox[Webhook inbox]
   Provider --> Reconciliation
   Ledger --> Reconciliation
 ```
 
-Run `cargo test`. This project does not process real funds or store card data. Provider adapters, PostgreSQL persistence, webhook verification, reconciliation imports, an HTTP API, and an operations UI will be added behind the tested domain core.
+```sh
+cargo test
+```
 
-## Non-goals
-
-- Card-data storage or PCI scope
-- Floating-point money
-- Pretending provider success equals settled funds
-
+This repository does not process real funds, verify provider signatures, or store card data. It is a tested domain core, not a payment processor.
